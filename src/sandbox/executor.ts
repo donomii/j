@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import * as path from "path";
 
 export interface ExecutionResult {
   stdout: string;
@@ -6,25 +7,35 @@ export interface ExecutionResult {
   exitCode: number | null;
 }
 
-/**
- * SandboxExecutor handles command execution.
- * In a production environment, this would interface with a Docker container or a dedicated VM.
- */
 export class SandboxExecutor {
-  private isSandboxed: boolean = false;
+  private useDocker: boolean;
 
   constructor() {
-    // Check if we are running in a known sandbox environment (e.g., Docker)
-    this.isSandboxed = process.env.RUNNING_IN_SANDBOX === 'true';
+    this.useDocker = process.env.USE_DOCKER === 'true';
   }
 
   async execute(command: string, args: string[] = [], cwd?: string): Promise<ExecutionResult> {
-    if (!this.isSandboxed && process.env.STRICT_SANDBOX === 'true') {
-      throw new Error("Execution blocked: Not in a secure sandbox environment.");
+    if (this.useDocker) {
+      return this.executeInDocker(command, args, cwd);
     }
+    return this.runSpawn(command, args, cwd);
+  }
 
-    // For this prototype, we use spawn which is safer than exec,
-    // but full isolation should be handled by the environment (e.g. Docker).
+  private async executeInDocker(command: string, args: string[] = [], cwd?: string): Promise<ExecutionResult> {
+    const workDir = cwd || process.cwd();
+    const dockerArgs = [
+      "run",
+      "--rm",
+      "-v", `${path.resolve(workDir)}:/workspace`,
+      "-w", "/workspace",
+      "node:20-slim",
+      "sh", "-c", `${command} ${args.join(" ")}`
+    ];
+
+    return this.runSpawn("docker", dockerArgs);
+  }
+
+  private runSpawn(command: string, args: string[] = [], cwd?: string): Promise<ExecutionResult> {
     return new Promise((resolve) => {
       const child = spawn(command, args, { cwd });
       let stdout = "";
