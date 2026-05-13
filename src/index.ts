@@ -14,19 +14,28 @@ function askQuestion(query: string): Promise<string> {
 }
 
 async function main() {
+  const provider = (process.env.LLM_PROVIDER as "openai" | "ollama") || "openai";
   const apiKey = process.env.OPENAI_API_KEY || "";
+  const baseUrl = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
+  const modelName = process.env.LLM_MODEL_NAME;
   const githubToken = process.env.GITHUB_TOKEN || "";
 
-  if (!apiKey) {
+  if (provider === "openai" && !apiKey) {
     console.error("Please set OPENAI_API_KEY in .env");
     process.exit(1);
   }
 
-  const orchestrator = new Orchestrator(apiKey, githubToken);
+  const orchestrator = new Orchestrator({
+    provider,
+    apiKey,
+    baseUrl,
+    modelName,
+    githubToken
+  });
 
   const prompt = await askQuestion("What task should I perform? ");
 
-  console.log("Generating plan...");
+  console.log(`Generating plan using ${provider}...`);
   const plan = await orchestrator.generatePlan(prompt);
 
   console.log("Proposed Plan:");
