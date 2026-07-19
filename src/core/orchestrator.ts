@@ -8,12 +8,9 @@ import { CodeEditor } from "../tools/editor.js";
 import { PlaywrightTester } from "../tools/tester.js";
 import { WebSearchTool } from "../tools/search.js";
 import { Validator } from "./validator.js";
-
-export interface PlanStep {
-  id: number;
-  description: string;
-  status: "pending" | "completed" | "failed";
-}
+import { parsePlanResponse, parseStepInstruction } from "./contracts.js";
+import { OrchestratorConfig, PlanStep, StepResult } from "../types.js";
+import { Workspace } from "../workspace.js";
 
 export class Orchestrator {
   private llm: BaseChatModel;
@@ -26,29 +23,23 @@ export class Orchestrator {
   private plan: PlanStep[] = [];
   private history: BaseMessage[] = [];
 
-  constructor(config: { provider: "openai" | "ollama", apiKey?: string, baseUrl?: string, modelName?: string, githubToken: string }) {
+  constructor(config: OrchestratorConfig) {
     if (config.provider === "openai") {
       this.llm = new ChatOpenAI({ openAIApiKey: config.apiKey, modelName: config.modelName || "gpt-4", temperature: 0 });
     } else {
-      this.llm = new ChatOllama({ baseUrl: config.baseUrl || "http://localhost:11434", model: config.modelName || "llama3", temperature: 0 });
+      this.llm = new ChatOllama({
+        baseUrl: config.baseUrl || "http://localhost:11434",
+        model: config.modelName || "llama3",
+        temperature: 0
+      });
     }
-    this.github = new GitHubService(config.githubToken);
-    this.executor = new SandboxExecutor();
-    this.editor = new CodeEditor();
-    this.tester = new PlaywrightTester();
+    const workspace = new Workspace(config.workspaceRoot);
+    this.github = new GitHubService(config.githubToken, workspace);
+    this.executor = new SandboxExecutor(workspace, config.useDocker, config.executorImage);
+    this.editor = new CodeEditor(workspace);
+    this.tester = new PlaywrightTester(workspace);
     this.searchTool = new WebSearchTool();
     this.validator = new Validator(this.llm);
-  }
-
-  private parseJsonResponse(content: string): any {
-    const jsonMatch = content.match(/```json\n([\s\S]*?)\n```/) || content.match(/```([\s\S]*?)```/);
-    const rawJson = jsonMatch ? jsonMatch[1] : content;
-    try {
-        return JSON.parse(rawJson!.trim());
-    } catch (e) {
-        const cleaned = rawJson!.trim().replace(/^[^[{]*/, "").replace(/[^\]}]*$/, "");
-        return JSON.parse(cleaned);
-    }
   }
 
   async generatePlan(prompt: string): Promise<PlanStep[]> {
@@ -64,7 +55,7 @@ export class Orchestrator {
     this.history.push(new AIMessage(response.content as string));
 
     const content = typeof response.content === 'string' ? response.content : JSON.stringify(response.content);
-    const steps = this.parseJsonResponse(content);
+    const steps = parsePlanResponse(content);
 
     this.plan = steps.map((step: string, index: number) => ({
       id: index + 1,
@@ -90,7 +81,12 @@ export class Orchestrator {
             stepSuccess = true;
           } else {
             console.log(`Validation failed for step ${step.id}: ${validation.feedback}`);
-            this.history.push(new HumanMessage(`Step "${step.description}" failed validation. Feedback: ${validation.feedback}. Please try again.`));
+            this.history.push(
+              new HumanMessage(
+                `Step "${step.description}" failed validation. ` +
+                `Feedback: ${validation.feedback}. Please try again.`
+              )
+            );
             retryCount++;
           }
         } catch (error) {
@@ -112,7 +108,7 @@ export class Orchestrator {
     }
   }
 
-  private async executeStep(step: PlanStep) {
+  private async executeStep(step: PlanStep): Promise<StepResult> {
     const systemPrompt = "You are a junior engineer executing a task. Think step-by-step. " +
         "Decide which tool to use. Available tools: editor, executor, tester, search, github. " +
         "Return JSON { \"thought\": \"your reasoning\", \"tool\": \"name\", \"args\": { ... } }";
@@ -125,50 +121,61 @@ export class Orchestrator {
 
     const response = await this.llm.invoke(messages);
     const content = typeof response.content === 'string' ? response.content : JSON.stringify(response.content);
-    const { thought, tool, args } = this.parseJsonResponse(content);
+    const instruction = parseStepInstruction(content);
 
-    console.log(`Agent Thought: ${thought}`);
+    console.log(`Agent Thought: ${instruction.thought}`);
 
-    let result: any;
-    switch (tool) {
+    switch (instruction.tool) {
       case "editor":
-        if (args.method === "writeFile") {
-            this.editor.writeFile(args.path, args.content);
-            result = "File written successfully";
-        } else if (args.method === "applyPatch") {
-            this.editor.applyPatch(args.path, args.search, args.replace);
-            result = "Patch applied successfully";
-        } else if (args.method === "readFile") {
-            result = this.editor.readFile(args.path);
+        const editorArgs = instruction.args;
+        if (editorArgs.method === "writeFile") {
+            this.editor.writeFile(editorArgs.path, editorArgs.content);
+            return { summary: "File written successfully" };
+        } else if (editorArgs.method === "applyPatch") {
+            this.editor.applyPatch(editorArgs.path, editorArgs.search, editorArgs.replace);
+            return { summary: "Patch applied successfully" };
         }
-        break;
+        return { summary: "File read successfully", output: this.editor.readFile(editorArgs.path) };
       case "executor":
-        result = await this.executor.execute(args.command, args.args || [], args.cwd);
-        break;
+        return {
+          summary: "Command completed",
+          execution: await this.executor.execute(
+            instruction.args.command,
+            instruction.args.args,
+            instruction.args.cwd
+          )
+        };
       case "tester":
-        result = await this.tester.runTest(args.url, args.screenshotPath);
-        break;
+        return {
+          summary: "Browser check completed",
+          output: await this.tester.runTest(instruction.args.url, instruction.args.screenshotPath)
+        };
       case "search":
-        result = await this.searchTool.search(args.query);
-        break;
+        return { summary: "Search completed", output: await this.searchTool.search(instruction.args.query) };
       case "github":
-        if (args.method === "clone") {
-            await this.github.cloneRepository(args.repoUrl, args.destination);
-            result = "Repository cloned";
-        } else if (args.method === "createBranch") {
-            await this.github.createBranch(args.owner, args.repo, args.branch);
-            result = "Branch created";
-        } else if (args.method === "commitAndPush") {
-            await this.github.commitAndPush(args.path, args.branch, args.message);
-            result = "Code pushed";
-        } else if (args.method === "createPR") {
-            result = await this.github.createPullRequest(args.owner, args.repo, args.title, args.body, args.head, args.base);
+        const githubArgs = instruction.args;
+        if (githubArgs.method === "clone") {
+            await this.github.cloneRepository(githubArgs.repoUrl, githubArgs.destination);
+            return { summary: "Repository cloned" };
+        } else if (githubArgs.method === "createBranch") {
+            await this.github.createBranch(githubArgs.owner, githubArgs.repo, githubArgs.branch, githubArgs.base);
+            return { summary: "Branch created" };
+        } else if (githubArgs.method === "commitAndPush") {
+            await this.github.commitAndPush(githubArgs.path, githubArgs.branch, githubArgs.message);
+            return { summary: "Repository changes committed and pushed" };
         }
-        break;
-      default:
-        throw new Error(`Unknown tool: ${tool}`);
+        return {
+          summary: "Pull request created",
+          pullRequest: await this.github.createPullRequest(
+            githubArgs.owner,
+            githubArgs.repo,
+            githubArgs.title,
+            githubArgs.body,
+            githubArgs.head,
+            githubArgs.base
+          )
+        };
     }
-    return result;
   }
 
   getPlan() {

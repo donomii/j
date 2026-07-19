@@ -19,6 +19,9 @@ async function main() {
   const baseUrl = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
   const modelName = process.env.LLM_MODEL_NAME;
   const githubToken = process.env.GITHUB_TOKEN || "";
+  const workspaceRoot = process.env.J_WORKSPACE || process.cwd();
+  const useDocker = process.env.USE_DOCKER?.toLowerCase() !== "false";
+  const executorImage = process.env.J_EXECUTOR_IMAGE || "node:20-slim";
 
   if (provider === "openai" && !apiKey) {
     console.error("Please set OPENAI_API_KEY in .env");
@@ -30,7 +33,10 @@ async function main() {
     apiKey,
     baseUrl,
     modelName,
-    githubToken
+    githubToken,
+    workspaceRoot,
+    useDocker,
+    executorImage
   });
 
   const prompt = await askQuestion("What task should I perform? ");

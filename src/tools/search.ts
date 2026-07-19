@@ -20,8 +20,9 @@ export class WebSearchTool {
       if (!results) return "No results found.";
 
       return results.slice(0, 3).map(r => r.replace(/<[^>]*>?/gm, '').trim()).join("\n---\n");
-    } catch (error: any) {
-      return `Search failed: ${error.message}`;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      return `Search failed: ${detail}`;
     }
   }
 }

@@ -9,6 +9,9 @@ async function pollIssues() {
   const owner = process.env.REPO_OWNER;
   const repo = process.env.REPO_NAME;
   const apiKey = process.env.OPENAI_API_KEY || "";
+  const workspaceRoot = process.env.J_WORKSPACE || process.cwd();
+  const useDocker = process.env.USE_DOCKER?.toLowerCase() !== "false";
+  const executorImage = process.env.J_EXECUTOR_IMAGE || "node:20-slim";
 
   if (!githubToken || !owner || !repo) {
     console.error("Missing configuration for polling issues.");
@@ -19,7 +22,10 @@ async function pollIssues() {
   const orchestrator = new Orchestrator({
     provider: (process.env.LLM_PROVIDER as "openai" | "ollama") || "openai",
     apiKey,
-    githubToken
+    githubToken,
+    workspaceRoot,
+    useDocker,
+    executorImage
   });
 
   console.log(`Polling issues for ${owner}/${repo}...`);
@@ -77,17 +83,19 @@ async function pollIssues() {
             issue_number: issue.number,
             state: "closed",
           });
-        } catch (error: any) {
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
           await octokit.rest.issues.createComment({
             owner,
             repo,
             issue_number: issue.number,
-            body: `I encountered an error while performing the task: ${error.message}`,
+            body: `I encountered an error while performing the task: ${detail}`,
           });
         }
       }
-    } catch (error: any) {
-      console.error("Error polling issues:", error.message);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.error("Error polling issues:", detail);
     }
 
     await new Promise(resolve => setTimeout(resolve, 60000)); // Poll every minute

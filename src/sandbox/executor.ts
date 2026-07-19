@@ -1,42 +1,37 @@
 import { spawn } from "child_process";
 import * as path from "path";
-
-export interface ExecutionResult {
-  stdout: string;
-  stderr: string;
-  exitCode: number | null;
-}
+import { ExecutionResult } from "../types.js";
+import { Workspace } from "../workspace.js";
 
 export class SandboxExecutor {
+  private workspace: Workspace;
   private useDocker: boolean;
+  private image: string;
 
-  constructor() {
-    this.useDocker = process.env.USE_DOCKER === 'true';
+  constructor(workspace: Workspace, useDocker: boolean, image: string) {
+    this.workspace = workspace;
+    this.useDocker = useDocker;
+    this.image = image;
   }
 
   async execute(command: string, args: string[] = [], cwd?: string): Promise<ExecutionResult> {
-    if (this.useDocker) {
-      return this.executeInDocker(command, args, cwd);
+    if (command === "") throw new Error("Executor command is empty.");
+    if (!this.useDocker) {
+      throw new Error(
+        `Execute ${JSON.stringify(command)} failed: container execution is disabled; ` +
+        "set USE_DOCKER=true to confine commands to the approved workspace."
+      );
     }
-    return this.runSpawn(command, args, cwd);
+    return this.executeInDocker(command, args, cwd);
   }
 
   private async executeInDocker(command: string, args: string[] = [], cwd?: string): Promise<ExecutionResult> {
-    const workDir = cwd || process.cwd();
-    const dockerArgs = [
-      "run",
-      "--rm",
-      "-v", `${path.resolve(workDir)}:/workspace`,
-      "-w", "/workspace",
-      "node:20-slim",
-      "sh", "-c", `${command} ${args.join(" ")}`
-    ];
-
+    const dockerArgs = buildDockerArguments(this.workspace, this.image, command, args, cwd);
     return this.runSpawn("docker", dockerArgs);
   }
 
   private runSpawn(command: string, args: string[] = [], cwd?: string): Promise<ExecutionResult> {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const child = spawn(command, args, { cwd });
       let stdout = "";
       let stderr = "";
@@ -53,17 +48,33 @@ export class SandboxExecutor {
         resolve({
           stdout,
           stderr,
-          exitCode: code,
+          exitCode: code ?? 1,
         });
       });
 
       child.on("error", (err) => {
-        resolve({
-          stdout,
-          stderr: err.message,
-          exitCode: 1,
-        });
+        reject(new Error(`Start executable ${JSON.stringify(command)} with ${args.length} arguments: ${err.message}`));
       });
     });
   }
+}
+
+export function buildDockerArguments(
+  workspace: Workspace,
+  image: string,
+  command: string,
+  args: string[],
+  cwd?: string
+): string[] {
+  const resolvedDirectory = workspace.resolve(cwd || workspace.root, true);
+  const relativeDirectory = path.relative(workspace.root, resolvedDirectory);
+  const containerDirectory = path.posix.join("/workspace", relativeDirectory.split(path.sep).join(path.posix.sep));
+  return [
+    "run", "--rm", "--network=none",
+    "-v", `${workspace.root}:/workspace`,
+    "-w", containerDirectory,
+    image,
+    command,
+    ...args
+  ];
 }
